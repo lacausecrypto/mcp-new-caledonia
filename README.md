@@ -3,7 +3,7 @@
 [![npm version](https://img.shields.io/npm/v/mcp-new-caledonia?style=flat-square)](https://www.npmjs.com/package/mcp-new-caledonia)
 [![npm total downloads](https://img.shields.io/npm/dt/mcp-new-caledonia?style=flat-square)](https://www.npmjs.com/package/mcp-new-caledonia)
 [![node version](https://img.shields.io/node/v/mcp-new-caledonia?style=flat-square)](https://www.npmjs.com/package/mcp-new-caledonia)
-[![license](https://img.shields.io/npm/l/mcp-new-caledonia?style=flat-square)](./LICENSE)
+[![license](https://img.shields.io/github/license/lacausecrypto/mcp-new-caledonia?style=flat-square)](https://github.com/lacausecrypto/mcp-new-caledonia/blob/main/LICENSE)
 
 Compact MCP server for [data.gouv.nc](https://data.gouv.nc/), exposing New Caledonia public datasets over `stdio` for Claude Desktop and other MCP clients.
 
