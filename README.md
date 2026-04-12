@@ -1,5 +1,6 @@
 # mcp-new-caledonia
 
+[![CI](https://img.shields.io/github/actions/workflow/status/lacausecrypto/mcp-new-caledonia/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/lacausecrypto/mcp-new-caledonia/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/mcp-new-caledonia?style=flat-square)](https://www.npmjs.com/package/mcp-new-caledonia)
 [![npm total downloads](https://img.shields.io/npm/dt/mcp-new-caledonia?style=flat-square)](https://www.npmjs.com/package/mcp-new-caledonia)
 [![node version](https://img.shields.io/node/v/mcp-new-caledonia?style=flat-square)](https://www.npmjs.com/package/mcp-new-caledonia)
