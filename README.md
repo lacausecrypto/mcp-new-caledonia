@@ -1,10 +1,10 @@
 # mcp-new-caledonia
 
-[![CI](https://img.shields.io/github/actions/workflow/status/lacausecrypto/mcp-new-caledonia/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/lacausecrypto/mcp-new-caledonia/actions/workflows/ci.yml)
-[![npm version](https://img.shields.io/npm/v/mcp-new-caledonia?style=flat-square)](https://www.npmjs.com/package/mcp-new-caledonia)
-[![npm total downloads](https://img.shields.io/npm/dt/mcp-new-caledonia?style=flat-square)](https://www.npmjs.com/package/mcp-new-caledonia)
-[![node version](https://img.shields.io/node/v/mcp-new-caledonia?style=flat-square)](https://www.npmjs.com/package/mcp-new-caledonia)
-[![license](https://img.shields.io/github/license/lacausecrypto/mcp-new-caledonia?style=flat-square)](https://github.com/lacausecrypto/mcp-new-caledonia/blob/main/LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/lacausecrypto/mcp-new-caledonia/ci.yml?branch=main&style=flat&label=CI)](https://github.com/lacausecrypto/mcp-new-caledonia/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/mcp-new-caledonia?style=flat)](https://www.npmjs.com/package/mcp-new-caledonia)
+[![npm total downloads](https://img.shields.io/npm/dt/mcp-new-caledonia?style=flat)](https://www.npmjs.com/package/mcp-new-caledonia)
+[![node version](https://img.shields.io/node/v/mcp-new-caledonia?style=flat)](https://www.npmjs.com/package/mcp-new-caledonia)
+[![license](https://img.shields.io/github/license/lacausecrypto/mcp-new-caledonia?style=flat)](https://github.com/lacausecrypto/mcp-new-caledonia/blob/main/LICENSE)
 
 Compact MCP server for [data.gouv.nc](https://data.gouv.nc/), exposing New Caledonia public datasets over `stdio` for Claude Desktop and other MCP clients.
 
