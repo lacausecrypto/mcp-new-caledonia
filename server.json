@@ -1,0 +1,22 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-07-09/server.schema.json",
+  "name": "io.github.lacausecrypto/mcp-new-caledonia",
+  "description": "MCP server for New Caledonia open data (data.gouv.nc)",
+  "version": "1.0.1",
+  "website_url": "https://github.com/lacausecrypto/mcp-new-caledonia",
+  "repository": {
+    "url": "https://github.com/lacausecrypto/mcp-new-caledonia",
+    "source": "github",
+    "id": "1208409357"
+  },
+  "packages": [
+    {
+      "registry_type": "npm",
+      "identifier": "mcp-new-caledonia",
+      "version": "1.0.1",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 {
   "name": "mcp-new-caledonia",
-  "version": "1.0.0",
+  "version": "1.0.1",
+  "mcpName": "io.github.lacausecrypto/mcp-new-caledonia",
   "description": "MCP server for New Caledonia open data (data.gouv.nc)",
   "homepage": "https://github.com/lacausecrypto/mcp-new-caledonia",
   "bugs": {
