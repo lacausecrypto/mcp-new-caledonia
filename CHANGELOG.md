@@ -36,5 +36,5 @@ Audit of every tool against the live data.gouv.nc API. Before this release, 7 of
 - Node.js 22+ required (Node 18 and 20 are end-of-life).
 - Biome lint/format; TypeScript `noUncheckedIndexedAccess`.
 - CI: Node 22 + 24 matrix, `npm audit`, actions pinned by SHA, least-privilege permissions.
-- Publish workflow: checks tag = `package.json` = `server.json`, publishes to npm (trusted publishing + provenance), pins `mcp-publisher` and verifies its SHA-256 (it was downloaded as `latest` without verification in a job holding an OIDC token).
+- MCP Registry workflow: checks tag = `package.json` = `server.json` and that the version is already on npm (npm stays a manual publish), pins `mcp-publisher` and verifies its SHA-256 (it was downloaded as `latest` without verification in a job holding an OIDC token).
 - Source maps no longer shipped without their sources.

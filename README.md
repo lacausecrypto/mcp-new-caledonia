@@ -6,7 +6,7 @@
 [![node version](https://img.shields.io/node/v/mcp-new-caledonia?style=flat)](https://www.npmjs.com/package/mcp-new-caledonia)
 [![license](https://img.shields.io/github/license/lacausecrypto/mcp-new-caledonia?style=flat)](https://github.com/lacausecrypto/mcp-new-caledonia/blob/main/LICENSE)
 
-Compact MCP server for [data.gouv.nc](https://data.gouv.nc/), exposing New Caledonia public datasets over `stdio` for Claude Desktop and other MCP clients.
+MCP server for New Caledonia open data ([data.gouv.nc](https://data.gouv.nc/)): RIDET companies, job offers, public holidays, the 2019 census, nickel production and the Tanéo GTFS feed, plus ODSQL queries over the whole catalog. Read-only, no API key, `stdio` for Claude Code, Claude Desktop and any MCP client.
 
 ## What It Covers
 
@@ -43,6 +43,12 @@ Or run directly with:
 npx mcp-new-caledonia
 ```
 
+## Claude Code
+
+```bash
+claude mcp add new-caledonia -- npx -y mcp-new-caledonia
+```
+
 ## Claude Desktop
 
 ```json
@@ -67,7 +73,9 @@ npm run dev
 
 ## Release
 
-Push a `vX.Y.Z` tag whose version matches `package.json` and `server.json`. The `Publish` workflow runs the gate, publishes to npm with provenance (npm trusted publishing, no token) and to the MCP Registry.
+1. Bump the version in `package.json` and `server.json` (they must match), update `CHANGELOG.md`.
+2. Publish to npm manually: `npm publish` (runs the build through `prepack`).
+3. Push the `vX.Y.Z` tag: the `Publish MCP Registry` workflow checks the versions match, runs the gate, checks the version is on npm and publishes `server.json` to the MCP Registry.
 
 ## Production Notes
 

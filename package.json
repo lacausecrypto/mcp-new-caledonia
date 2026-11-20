@@ -2,7 +2,7 @@
   "name": "mcp-new-caledonia",
   "version": "1.1.0",
   "mcpName": "io.github.lacausecrypto/mcp-new-caledonia",
-  "description": "MCP server for New Caledonia open data (data.gouv.nc)",
+  "description": "MCP server for New Caledonia open data (data.gouv.nc): RIDET companies, job offers, holidays, 2019 census, nickel production, Tanéo GTFS, plus ODSQL queries over the whole catalog. No API key.",
   "homepage": "https://github.com/lacausecrypto/mcp-new-caledonia",
   "bugs": {
     "url": "https://github.com/lacausecrypto/mcp-new-caledonia/issues"
@@ -38,8 +38,13 @@
   "keywords": [
     "mcp",
     "model-context-protocol",
+    "mcp-server",
     "new-caledonia",
+    "nouvelle-caledonie",
     "open-data",
+    "data-gouv-nc",
+    "opendatasoft",
+    "ridet",
     "pacific"
   ],
   "author": "lacausecrypto",
