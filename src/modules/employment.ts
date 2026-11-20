@@ -1,266 +1,168 @@
-// src/modules/employment.ts
-
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { client } from '../client.js';
-import { JobOffer, RecordObject } from '../types.js';
-import {
-  buildWhere,
-  errorResult,
-  jsonResult,
-  pickNumber,
-  pickString,
-  quote,
-} from '../utils/helpers.js';
+import { READ_ONLY, safe } from '../tool.js';
+import { and, dateLiteral, eq, likePrefix, search } from '../utils/odsql.js';
+import { num, str } from '../utils/records.js';
 
 const DATASET_JOB_OFFERS = 'offres-d-emploi-deposees-sur-le-site-emploi-nc';
 const DATASET_JOB_SEEKERS = 'demandeurs_emploi';
-const DATASET_CIVIL_SERVANTS = 'fonctionnaires_nc_communes';
 const DATASET_PARTIAL_UNEMPLOYMENT = 'entreprises_chomage_partiel';
 
+const CONTRACT_TYPES = [
+  'CDI',
+  'CDD',
+  'CDIC',
+  'INTERIM',
+  'ALTERNANCE',
+  'STAGE',
+  'CONTRAT AIDE',
+  'INTERMITTENT/SAISONNIER',
+] as const;
+
+const JOB_SEEKER_GROUPS = {
+  niveau: 'niveau',
+  genre: 'genre',
+  metier_recherche: 'code_rome_recherche',
+  annee: 'year(annee) as annee',
+} as const;
+
+const PARTIAL_UNEMPLOYMENT_SCHEMES = {
+  commun: 'CHP COMMUN',
+  nickel: 'CHP NICKEL',
+  evenements_mai_2024: 'CHP EVENEMENT MAI 2024',
+  renouvellement_2024: 'RENOUVELLEMENT EVENEMENTS 2024',
+} as const;
+
+type Scheme = keyof typeof PARTIAL_UNEMPLOYMENT_SCHEMES;
+const SCHEME_KEYS = Object.keys(PARTIAL_UNEMPLOYMENT_SCHEMES) as [Scheme, ...Scheme[]];
+
 export function registerEmploymentTools(server: McpServer): void {
-  /**
-   * Search job offers
-   */
-  server.tool(
+  server.registerTool(
     'nc_search_job_offers',
-    'Search for job offers posted on the official New Caledonia employment portal',
     {
-      query: z.string().optional().describe('Search keywords'),
-      commune: z.string().optional().describe('Filter by commune'),
-      contract_type: z
-        .enum(['CDI', 'CDD', 'Stage', 'Alternance'])
-        .optional()
-        .describe('Contract type'),
-      limit: z.number().int().min(1).max(100).default(20).describe('Max results'),
+      annotations: READ_ONLY,
+      title: 'Search job offers',
+      description:
+        'Job offers posted on emploi.nc, the official New Caledonia employment portal, most recent first.',
+      inputSchema: {
+        query: z.string().trim().min(2).max(200).optional().describe('Search terms'),
+        commune: z.string().trim().min(1).max(80).optional().describe('Commune name prefix'),
+        contract_type: z.enum(CONTRACT_TYPES).optional().describe('Contract type'),
+        limit: z.number().int().min(1).max(100).default(20).describe('Max results'),
+      },
     },
-    async ({ query, commune, contract_type, limit }) => {
-      try {
-        const [communeField, contractField, publishedField] = await Promise.all([
-          client.resolveField(DATASET_JOB_OFFERS, ['ville', 'commune']),
-          client.resolveField(DATASET_JOB_OFFERS, ['type_contrat', 'contrat']),
-          client.resolveField(DATASET_JOB_OFFERS, ['created_at', 'date_publication']),
-        ]);
-
-        const data = await client.getRecords<JobOffer>(DATASET_JOB_OFFERS, {
-          where: buildWhere([
-            query ? `search(${quote(query)})` : undefined,
-            commune && communeField
-              ? `${communeField} LIKE ${quote(`${commune}%`)}`
-              : undefined,
-            contract_type && contractField
-              ? `${contractField} = ${quote(contract_type)}`
-              : undefined,
-          ]),
-          order_by: `${publishedField ?? 'created_at'} DESC`,
-          limit,
-        });
-
-        return jsonResult({
-          total_offers: data.total_count,
-          job_offers: data.results.map((job) => ({
-            reference: pickString(job, ['uuid', 'reference']),
-            title: pickString(job, ['titre', 'intitule']) ?? 'Unknown',
-            employer:
-              pickString(job, ['designation', 'employeur']) ??
-              pickString(job, ['enseigne']),
-            commune: pickString(job, [communeField ?? 'ville', 'ville', 'commune']),
-            contract: pickString(job, [contractField ?? 'type_contrat', 'type_contrat', 'contrat']),
-            salary: pickString(job, ['salaire']),
-            published: pickString(job, [publishedField ?? 'created_at', 'created_at']),
-          })),
-        });
-      } catch (error) {
-        return errorResult(
-          error instanceof Error ? error.message : 'Failed to search job offers'
-        );
-      }
-    }
+    safe(async ({ query, commune, contract_type, limit }) => {
+      const data = await client.getRecords(DATASET_JOB_OFFERS, {
+        where: and([
+          query === undefined ? undefined : search(query),
+          commune === undefined ? undefined : likePrefix('ville', commune),
+          contract_type === undefined ? undefined : eq('type_contrat', contract_type),
+        ]),
+        order_by: 'created_at desc',
+        limit,
+      });
+      return {
+        total_offers: data.total_count,
+        job_offers: data.results.map((row) => ({
+          reference: str(row, 'uuid'),
+          title: str(row, 'titre'),
+          employer: str(row, 'designation') ?? str(row, 'enseigne'),
+          commune: str(row, 'ville'),
+          contract: str(row, 'type_contrat'),
+          positions: num(row, 'nb_postes'),
+          rome_code: str(row, 'rome_code'),
+          required_diploma: str(row, 'diplome'),
+          experience: str(row, 'experience'),
+          status: str(row, 'statut'),
+          start_date: str(row, 'date_debut'),
+          published: str(row, 'created_at'),
+        })),
+      };
+    }),
   );
 
-  /**
-   * Get job seeker statistics
-   */
-  server.tool(
+  server.registerTool(
     'nc_get_job_seeker_stats',
-    'Get statistics about job seekers in New Caledonia by various criteria',
     {
-      year: z.number().int().min(2004).max(2030).optional().describe('Year to query'),
-      province: z
-        .enum(['Sud', 'Nord', 'Iles'])
-        .optional()
-        .describe('Filter by province'),
-      group_by: z
-        .enum(['province', 'age_class', 'diplome', 'metier_recherche'])
-        .default('province')
-        .describe('How to group results'),
+      annotations: READ_ONLY,
+      title: 'Job seeker statistics',
+      description:
+        'Number of registered job seekers grouped by education level (niveau), gender (genre), sought occupation (ROME code) or registration year (annee). Top 100 groups by count.',
+      inputSchema: {
+        group_by: z
+          .enum(['niveau', 'genre', 'metier_recherche', 'annee'])
+          .default('niveau')
+          .describe('Grouping dimension'),
+        year: z
+          .number()
+          .int()
+          .min(1970)
+          .max(2100)
+          .optional()
+          .describe('Only job seekers registered this year'),
+      },
     },
-    async ({ year, province, group_by }) => {
-      try {
-        const groupFieldMap: Record<string, string | undefined> = {
-          province: undefined,
-          age_class: undefined,
-          diplome: await client.resolveField(DATASET_JOB_SEEKERS, ['niveau', 'diplome']),
-          metier_recherche: await client.resolveField(DATASET_JOB_SEEKERS, [
-            'code_rome_recherche',
-            'metier_recherche',
-          ]),
-        };
-
-        const yearField =
-          (await client.resolveField(DATASET_JOB_SEEKERS, ['annee'])) ?? 'annee';
-        const groupField = groupFieldMap[group_by];
-
-        if (!groupField) {
-          return jsonResult({
-            available: false,
-            requested_group_by: group_by,
-            message:
-              'The currently published dataset does not expose the requested grouping dimension.',
-            available_groupings: ['diplome', 'metier_recherche'],
-            requested_province: province,
-            note:
-              province !== undefined
-                ? 'Province filtering is not available on the current public dataset schema.'
-                : undefined,
-          });
-        }
-
-        const conditions = buildWhere([
-          year !== undefined ? `${yearField} = ${quote(String(year))}` : undefined,
-        ]);
-
-        const data = await client.getAggregates<RecordObject>(
-          DATASET_JOB_SEEKERS,
-          `count(*) as count, ${groupField}`,
-          {
-            where: conditions,
-            groupBy: groupField,
-          }
-        );
-
-        return jsonResult({
-          year,
-          province,
-          grouped_by: group_by,
-          source_field: groupField,
-          note:
-            province !== undefined
-              ? 'Province filtering is not available on the current public dataset schema.'
-              : undefined,
-          statistics: data.results,
-        });
-      } catch (error) {
-        return errorResult(
-          error instanceof Error ? error.message : 'Failed to fetch job seeker stats'
-        );
-      }
-    }
+    safe(async ({ group_by, year }) => {
+      const result = await client.groupCount(DATASET_JOB_SEEKERS, {
+        groupBy: JOB_SEEKER_GROUPS[group_by],
+        where:
+          year === undefined
+            ? undefined
+            : `annee >= ${dateLiteral(`${year}-01-01`)} AND annee <= ${dateLiteral(`${year}-12-31`)}`,
+        orderBy: group_by === 'annee' ? 'annee asc' : 'count desc',
+      });
+      return {
+        grouped_by: group_by,
+        year: year ?? null,
+        truncated: result.truncated,
+        statistics: result.rows,
+      };
+    }),
   );
 
-  /**
-   * Get civil servants data
-   */
-  server.tool(
-    'nc_get_civil_servants',
-    'Get data about New Caledonia and municipal civil servants',
-    {
-      year: z.number().int().min(2013).max(2030).optional().describe('Year'),
-      employer_type: z.string().optional().describe('Type of employer'),
-      limit: z.number().int().min(1).max(100).default(50).describe('Max results'),
-    },
-    async ({ year, employer_type, limit }) => {
-      try {
-        const exists = await client.datasetExists(DATASET_CIVIL_SERVANTS);
-        if (!exists) {
-          return jsonResult({
-            available: false,
-            dataset_id: DATASET_CIVIL_SERVANTS,
-            message:
-              'This dataset is not currently published in the public data.gouv.nc catalog.',
-            requested_filters: {
-              year,
-              employer_type,
-              limit,
-            },
-          });
-        }
-
-        const conditions = buildWhere([
-          year !== undefined ? `annee = ${year}` : undefined,
-          employer_type ? `type_employeur LIKE ${quote(`${employer_type}%`)}` : undefined,
-        ]);
-
-        const data = await client.getRecords<RecordObject>(DATASET_CIVIL_SERVANTS, {
-          where: conditions,
-          limit,
-        });
-
-        return jsonResult({
-          total_records: data.total_count,
-          civil_servants: data.results,
-        });
-      } catch (error) {
-        return errorResult(
-          error instanceof Error ? error.message : 'Failed to fetch civil servants'
-        );
-      }
-    }
-  );
-
-  /**
-   * Get partial unemployment data
-   */
-  server.tool(
+  server.registerTool(
     'nc_get_partial_unemployment',
-    'Get companies on partial unemployment schemes in New Caledonia (including special nickel and civil unrest schemes)',
     {
-      type: z
-        .enum(['droit_commun', 'nickel', 'exactions'])
-        .optional()
-        .describe('Type of partial unemployment scheme'),
-      limit: z.number().int().min(1).max(100).default(50).describe('Max results'),
+      annotations: READ_ONLY,
+      title: 'Partial unemployment schemes',
+      description:
+        'Companies benefiting from partial unemployment (chômage partiel) schemes: common law, nickel crisis, May 2024 civil unrest and its renewals. Most recent first.',
+      inputSchema: {
+        scheme: z.enum(SCHEME_KEYS).optional().describe('Scheme'),
+        commune: z.string().trim().min(1).max(80).optional().describe('Commune name prefix'),
+        limit: z.number().int().min(1).max(100).default(50).describe('Max results'),
+      },
     },
-    async ({ type, limit }) => {
-      try {
-        const typeField =
-          (await client.resolveField(DATASET_PARTIAL_UNEMPLOYMENT, [
-            'type_de_chp',
-            'type_chomage',
-          ])) ?? 'type_de_chp';
-
-        const typePatternMap: Record<string, string> = {
-          droit_commun: '%DROIT COMMUN%',
-          nickel: '%NICKEL%',
-          exactions: '%EXACTION%',
-        };
-
-        const data = await client.getRecords<RecordObject>(DATASET_PARTIAL_UNEMPLOYMENT, {
-          where: type ? `${typeField} LIKE ${quote(typePatternMap[type])}` : undefined,
-          order_by: 'date_debut DESC',
-          limit,
-        });
-
-        return jsonResult({
-          scheme_type: type ?? 'all',
-          total_companies: data.total_count,
-          companies: data.results.map((company) => ({
-            ridet: pickString(company, ['ridet', 'rid7']),
-            name: pickString(company, ['raison_sociale', 'denomination']),
-            brand: pickString(company, ['enseigne']),
-            commune: pickString(company, ['commune', 'libelle_commune']),
-            province: pickString(company, ['province']),
-            scheme: pickString(company, [typeField, 'type_de_chp']),
-            employees: pickNumber(company, ['nb_salaries_concernes', 'nb_salaries']),
-            start_date: pickString(company, ['date_debut']),
-            end_date: pickString(company, ['date_fin']),
-          })),
-        });
-      } catch (error) {
-        return errorResult(
-          error instanceof Error ? error.message : 'Failed to fetch partial unemployment'
-        );
-      }
-    }
+    safe(async ({ scheme, commune, limit }) => {
+      const data = await client.getRecords(DATASET_PARTIAL_UNEMPLOYMENT, {
+        where: and([
+          scheme === undefined
+            ? undefined
+            : eq('type_de_chp', PARTIAL_UNEMPLOYMENT_SCHEMES[scheme]),
+          commune === undefined ? undefined : likePrefix('libelle_commune', commune),
+        ]),
+        order_by: 'date_debut desc',
+        limit,
+      });
+      return {
+        scheme: scheme ?? 'all',
+        total_records: data.total_count,
+        companies: data.results.map((row) => ({
+          ridet: str(row, 'ridet'),
+          name: str(row, 'raison_sociale'),
+          sign: str(row, 'enseigne'),
+          activity: str(row, 'naf_libelle'),
+          commune: str(row, 'libelle_commune'),
+          province: str(row, 'province'),
+          scheme: str(row, 'type_de_chp'),
+          employees_concerned: num(row, 'nb_salaries_concernes'),
+          start_date: str(row, 'date_debut'),
+          end_date: str(row, 'date_fin'),
+          decree: str(row, 'numero_arrete'),
+          decree_date: str(row, 'date_arrete'),
+        })),
+      };
+    }),
   );
 }

@@ -5,45 +5,59 @@ on:
     tags:
       - 'v*'
 
+permissions:
+  contents: read
+
+env:
+  MCP_PUBLISHER_VERSION: v1.8.9
+  MCP_PUBLISHER_SHA256: 4d527ca8f1ced0394c962dc925c2a4a4addef441cbefd62501c875e9481823a8
+
 jobs:
   publish:
     runs-on: ubuntu-latest
-    permissions:
-      id-token: write
-      contents: read
     timeout-minutes: 15
-
+    permissions:
+      contents: read
+      id-token: write # MCP Registry GitHub OIDC login
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          node-version: '20'
+          node-version: '24'
           cache: npm
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build
-        run: npm run build
-
-      - name: Test
-        run: npm test
-
-      - name: Set release version in server.json
+      - name: Check tag matches package.json and server.json
         env:
           GIT_TAG: ${{ github.ref_name }}
         run: |
-          node -e "const fs = require('node:fs'); const version = process.env.GIT_TAG.replace(/^v/, ''); const file = 'server.json'; const data = JSON.parse(fs.readFileSync(file, 'utf8')); data.version = version; if (Array.isArray(data.packages)) { data.packages = data.packages.map((pkg) => ({ ...pkg, version })); } fs.writeFileSync(file, JSON.stringify(data, null, 2) + '\n');"
+          node -e '
+            const fs = require("node:fs");
+            const tag = process.env.GIT_TAG.replace(/^v/, "");
+            const pkg = JSON.parse(fs.readFileSync("package.json", "utf8"));
+            const srv = JSON.parse(fs.readFileSync("server.json", "utf8"));
+            const versions = { tag, package: pkg.version, server: srv.version, ...Object.fromEntries(srv.packages.map((p, i) => ["server.packages[" + i + "]", p.version])) };
+            const distinct = new Set(Object.values(versions));
+            if (distinct.size !== 1) { console.error("Version mismatch:", versions); process.exit(1); }
+          '
 
-      - name: Install mcp-publisher
+      - run: npm ci
+      - run: npm run check
+
+      - name: Check the version is already on npm (published manually)
         run: |
-          curl -L "https://github.com/modelcontextprotocol/registry/releases/latest/download/mcp-publisher_$(uname -s | tr '[:upper:]' '[:lower:]')_$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/').tar.gz" | tar xz mcp-publisher
+          VERSION=$(node -p 'require("./package.json").version')
+          if ! npm view "mcp-new-caledonia@${VERSION}" version >/dev/null 2>&1; then
+            echo "::error::mcp-new-caledonia@${VERSION} is not on npm yet. Run npm publish first, then push the tag."
+            exit 1
+          fi
 
-      - name: Authenticate to MCP Registry
-        run: ./mcp-publisher login github-oidc
+      - name: Install mcp-publisher (pinned + checksum)
+        run: |
+          curl -fsSL -o mcp-publisher.tar.gz "https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz"
+          echo "${MCP_PUBLISHER_SHA256}  mcp-publisher.tar.gz" | sha256sum --check --strict
+          tar xzf mcp-publisher.tar.gz mcp-publisher
 
       - name: Publish to MCP Registry
-        run: ./mcp-publisher publish
+        run: |
+          ./mcp-publisher login github-oidc
+          ./mcp-publisher publish
