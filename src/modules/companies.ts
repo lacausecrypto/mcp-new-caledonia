@@ -1,274 +1,183 @@
-// src/modules/companies.ts
-
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { client } from '../client.js';
-import { Company, Establishment, RecordObject } from '../types.js';
-import {
-  buildWhere,
-  errorResult,
-  jsonResult,
-  pickString,
-  quote,
-} from '../utils/helpers.js';
+import { READ_ONLY, safe } from '../tool.js';
+import type { RecordObject } from '../types.js';
+import { and, eq, likePrefix, search } from '../utils/odsql.js';
+import { str } from '../utils/records.js';
 
 const DATASET_COMPANIES = 'entreprises-actives-au-ridet';
 const DATASET_ESTABLISHMENTS = 'etablissements-actifs-au-ridet';
 
-function normalizeRidet(input: string): string {
-  return input.length > 7 ? input.slice(0, 7) : input;
+const GROUP_FIELDS = {
+  province: 'province',
+  commune: 'libelle_commune',
+  forme_juridique: 'libelle_formjur',
+  ape: 'division_naf, libelle_division_naf',
+  section: 'section_naf, libelle_section_naf',
+} as const;
+
+function mapCompany(row: RecordObject) {
+  return {
+    ridet: str(row, 'rid7'),
+    name: str(row, 'denomination'),
+    legal_form: str(row, 'libelle_formjur'),
+    activity_code: str(row, 'code_ape'),
+    activity: str(row, 'libelle_naf'),
+    naf_division: str(row, 'libelle_division_naf'),
+    commune: str(row, 'libelle_commune'),
+    province: str(row, 'province'),
+    active_as_of: str(row, 'date_entreprises_actives'),
+  };
 }
 
+/** "47" → NAF division; "4711" / "4711A" → APE code prefix. */
+function sectorCondition(code: string): string {
+  return code.length === 2 ? eq('division_naf', code) : likePrefix('code_ape', code);
+}
+
+const sectorSchema = z
+  .string()
+  .regex(/^\d{2}(\d{2}[A-Z]?)?$/, 'Expected a NAF division ("47") or APE code ("4711", "4711A")');
+
 export function registerCompanyTools(server: McpServer): void {
-  /**
-   * Search for companies
-   */
-  server.tool(
+  server.registerTool(
     'nc_search_companies',
-    'Search for active companies in New Caledonia RIDET registry. RIDET is the local business registry equivalent to SIRET in France.',
     {
-      query: z.string().min(2).describe('Search term (company name, activity)'),
-      commune: z.string().optional().describe('Filter by commune'),
-      sector: z.string().optional().describe('Filter by APE/NAF sector code'),
-      limit: z.number().int().min(1).max(100).default(20).describe('Max results'),
+      annotations: READ_ONLY,
+      title: 'Search companies (RIDET)',
+      description:
+        'Full-text search of active companies in the RIDET registry (New Caledonia equivalent of SIREN/SIRET).',
+      inputSchema: {
+        query: z.string().trim().min(2).max(200).describe('Search terms (name, activity…)'),
+        commune: z.string().trim().min(1).max(80).optional().describe('Commune name prefix'),
+        sector: sectorSchema.optional().describe('NAF division ("47") or APE code ("4711A")'),
+        limit: z.number().int().min(1).max(100).default(20).describe('Max results'),
+      },
     },
-    async ({ query, commune, sector, limit }) => {
-      try {
-        const [communeField, activityField] = await Promise.all([
-          client.resolveField(DATASET_COMPANIES, ['libelle_commune', 'commune']),
-          client.resolveField(DATASET_COMPANIES, ['code_ape', 'ape', 'division_naf']),
-        ]);
-
-        const conditions = buildWhere([
-          `search(${quote(query)})`,
-          commune && communeField
-            ? `${communeField} LIKE ${quote(`${commune}%`)}`
-            : undefined,
-          sector && activityField ? `${activityField} LIKE ${quote(`${sector}%`)}` : undefined,
-        ]);
-
-        const data = await client.getRecords<Company>(DATASET_COMPANIES, {
-          where: conditions,
-          limit,
-        });
-
-        return jsonResult({
-          query,
-          total_found: data.total_count,
-          companies: data.results.map((company) => ({
-            ridet:
-              pickString(company, ['rid7', 'ridet']) ??
-              pickString(company, ['ridet', 'rid7']),
-            name: pickString(company, ['denomination']) ?? 'Unknown',
-            acronym: pickString(company, ['sigle']),
-            legal_form:
-              pickString(company, ['libelle_formjur', 'forme_juridique']) ??
-              pickString(company, ['code_formjur']),
-            activity_code:
-              pickString(company, ['code_ape', 'ape']) ??
-              pickString(company, ['division_naf']),
-            activity:
-              pickString(company, ['libelle_naf', 'ape_libelle']) ??
-              pickString(company, ['libelle_division_naf']),
-            commune: pickString(company, ['libelle_commune', 'commune']),
-            province: pickString(company, ['province']),
-            created: pickString(company, ['date_creation', 'date_entreprises_actives']),
-            size: pickString(company, ['effectif_tranche']),
-          })),
-        });
-      } catch (error) {
-        return errorResult(
-          error instanceof Error ? error.message : 'Failed to search companies'
-        );
-      }
-    }
+    safe(async ({ query, commune, sector, limit }) => {
+      const data = await client.getRecords(DATASET_COMPANIES, {
+        where: and([
+          search(query),
+          commune === undefined ? undefined : likePrefix('libelle_commune', commune),
+          sector === undefined ? undefined : sectorCondition(sector),
+        ]),
+        limit,
+      });
+      return {
+        query,
+        total_found: data.total_count,
+        companies: data.results.map(mapCompany),
+      };
+    }),
   );
 
-  /**
-   * Get company details by RIDET number
-   */
-  server.tool(
+  server.registerTool(
     'nc_get_company',
-    'Get detailed information about a specific company using its RIDET number',
     {
-      ridet: z
-        .string()
-        .regex(/^\d{6,10}$/)
-        .describe('RIDET number (6-10 digits, 7-digit registry number accepted)'),
+      annotations: READ_ONLY,
+      title: 'Company by RIDET number',
+      description:
+        'Company details and its active establishments. Accepts a 7-digit RIDET or a 10-digit RIDET (company + 3-digit establishment number).',
+      inputSchema: {
+        ridet: z
+          .string()
+          .regex(/^\d{7}(\d{3})?$/, 'Expected 7 digits (company) or 10 digits (establishment)')
+          .describe('RIDET number'),
+      },
     },
-    async ({ ridet }) => {
-      try {
-        const normalizedRidet = normalizeRidet(ridet);
-        const companyRidetField =
-          (await client.resolveField(DATASET_COMPANIES, ['rid7', 'ridet'])) ?? 'rid7';
+    safe(async ({ ridet }) => {
+      const rid7 = ridet.slice(0, 7);
+      const requestedEstablishment = ridet.length === 10 ? ridet.slice(7) : null;
 
-        const data = await client.getRecords<Company>(DATASET_COMPANIES, {
-          where: `${companyRidetField} = ${quote(normalizedRidet)}`,
+      const [companies, establishments] = await Promise.all([
+        client.getRecords(DATASET_COMPANIES, {
+          where: eq('rid7', rid7),
           limit: 1,
-        });
+        }),
+        client.getRecords(DATASET_ESTABLISHMENTS, {
+          where: eq('rid7', rid7),
+          order_by: 'ndegetablissement asc',
+          limit: 100,
+        }),
+      ]);
 
-        if (data.total_count === 0) {
-          return jsonResult({
-            found: false,
-            ridet: normalizedRidet,
-            message: 'Company not found',
-          });
-        }
-
-        const company = data.results[0];
-        const establishmentRidetField =
-          (await client.resolveField(DATASET_ESTABLISHMENTS, ['rid7', 'ridet'])) ?? 'rid7';
-
-        const establishments = await client.getRecords<Establishment>(
-          DATASET_ESTABLISHMENTS,
-          {
-            where: `${establishmentRidetField} = ${quote(normalizedRidet)}`,
-            limit: 50,
-          }
-        );
-
-        return jsonResult({
-          found: true,
-          company: {
-            ridet: pickString(company, ['rid7', 'ridet']),
-            name: pickString(company, ['denomination']),
-            acronym: pickString(company, ['sigle']),
-            legal_form:
-              pickString(company, ['libelle_formjur', 'forme_juridique']) ??
-              pickString(company, ['code_formjur']),
-            activity_code: pickString(company, ['code_ape', 'ape']),
-            activity:
-              pickString(company, ['libelle_naf', 'ape_libelle']) ??
-              pickString(company, ['libelle_division_naf']),
-            commune: pickString(company, ['libelle_commune', 'commune']),
-            province: pickString(company, ['province']),
-            created: pickString(company, ['date_creation', 'date_entreprises_actives']),
-            size: pickString(company, ['effectif_tranche']),
-          },
-          establishments: {
-            count: establishments.total_count,
-            list: establishments.results.map((establishment) => {
-              const nic = pickString(establishment, ['nic', 'ndegetablissement']);
-              return {
-                nic,
-                name:
-                  pickString(establishment, ['enseigne']) ??
-                  pickString(establishment, ['denomination']),
-                address: pickString(establishment, ['adresse']),
-                commune: pickString(establishment, ['libelle_commune', 'commune']),
-                is_headquarters: nic === '000',
-              };
-            }),
-          },
-        });
-      } catch (error) {
-        return errorResult(
-          error instanceof Error ? error.message : 'Failed to fetch company'
-        );
+      const company = companies.results[0];
+      if (company === undefined) {
+        return { found: false, ridet: rid7 };
       }
-    }
-  );
 
-  /**
-   * Get companies by sector
-   */
-  server.tool(
-    'nc_get_companies_by_sector',
-    'Get all companies in a specific activity sector (APE/NAF code)',
-    {
-      sector_code: z
-        .string()
-        .min(2)
-        .max(5)
-        .describe('APE/NAF sector code (e.g., "07" for mining, "47" for retail)'),
-      commune: z.string().optional().describe('Filter by commune'),
-      limit: z.number().int().min(1).max(100).default(50).describe('Max results'),
-    },
-    async ({ sector_code, commune, limit }) => {
-      try {
-        const [communeField, sectorField] = await Promise.all([
-          client.resolveField(DATASET_COMPANIES, ['libelle_commune', 'commune']),
-          client.resolveField(DATASET_COMPANIES, ['division_naf', 'code_ape', 'ape']),
-        ]);
-
-        const data = await client.getRecords<Company>(DATASET_COMPANIES, {
-          where: buildWhere([
-            sectorField ? `${sectorField} LIKE ${quote(`${sector_code}%`)}` : undefined,
-            commune && communeField
-              ? `${communeField} LIKE ${quote(`${commune}%`)}`
-              : undefined,
-          ]),
-          limit,
-        });
-
-        return jsonResult({
-          sector_code,
-          total_companies: data.total_count,
-          companies: data.results.map((company) => ({
-            ridet: pickString(company, ['rid7', 'ridet']),
-            name: pickString(company, ['denomination']),
-            activity:
-              pickString(company, ['libelle_naf', 'ape_libelle']) ??
-              pickString(company, ['libelle_division_naf']),
-            commune: pickString(company, ['libelle_commune', 'commune']),
+      return {
+        found: true,
+        company: mapCompany(company),
+        requested_establishment: requestedEstablishment,
+        establishments: {
+          total: establishments.total_count,
+          list: establishments.results.map((row) => ({
+            establishment_number: str(row, 'ndegetablissement'),
+            ridet: `${rid7}${str(row, 'ndegetablissement') ?? ''}`,
+            sign: str(row, 'enseigne'),
+            activity: str(row, 'libelle_naf'),
+            commune: str(row, 'libelle_commune'),
+            province: str(row, 'province'),
           })),
-        });
-      } catch (error) {
-        return errorResult(
-          error instanceof Error ? error.message : 'Failed to fetch companies by sector'
-        );
-      }
-    }
+        },
+      };
+    }),
   );
 
-  /**
-   * Get company statistics
-   */
-  server.tool(
-    'nc_get_company_statistics',
-    'Get aggregate statistics about companies in New Caledonia',
+  server.registerTool(
+    'nc_get_companies_by_sector',
     {
-      group_by: z
-        .enum(['province', 'commune', 'forme_juridique', 'ape'])
-        .describe('How to group the statistics'),
+      annotations: READ_ONLY,
+      title: 'Companies by activity sector',
+      description:
+        'List active companies of a NAF division (2 digits, e.g. "07" metal ore mining, "47" retail) or APE code prefix.',
+      inputSchema: {
+        sector_code: sectorSchema.describe('NAF division ("47") or APE code ("4711A")'),
+        commune: z.string().trim().min(1).max(80).optional().describe('Commune name prefix'),
+        limit: z.number().int().min(1).max(100).default(50).describe('Max results'),
+      },
     },
-    async ({ group_by }) => {
-      try {
-        const groupFieldMap: Record<string, string | undefined> = {
-          province: await client.resolveField(DATASET_COMPANIES, ['province']),
-          commune: await client.resolveField(DATASET_COMPANIES, ['libelle_commune', 'commune']),
-          forme_juridique: await client.resolveField(DATASET_COMPANIES, [
-            'libelle_formjur',
-            'forme_juridique',
-          ]),
-          ape: await client.resolveField(DATASET_COMPANIES, ['division_naf', 'code_ape', 'ape']),
-        };
+    safe(async ({ sector_code, commune, limit }) => {
+      const data = await client.getRecords(DATASET_COMPANIES, {
+        where: and([
+          sectorCondition(sector_code),
+          commune === undefined ? undefined : likePrefix('libelle_commune', commune),
+        ]),
+        order_by: 'denomination asc',
+        limit,
+      });
+      return {
+        sector_code,
+        total_companies: data.total_count,
+        companies: data.results.map(mapCompany),
+      };
+    }),
+  );
 
-        const groupField = groupFieldMap[group_by];
-        if (!groupField) {
-          return jsonResult({
-            grouped_by: group_by,
-            message: 'Requested grouping is not available on the current dataset schema.',
-            statistics: [],
-          });
-        }
-
-        const data = await client.getAggregates<RecordObject>(
-          DATASET_COMPANIES,
-          `count(*) as count, ${groupField}`,
-          { groupBy: groupField }
-        );
-
-        return jsonResult({
-          grouped_by: group_by,
-          source_field: groupField,
-          statistics: data.results,
-        });
-      } catch (error) {
-        return errorResult(
-          error instanceof Error ? error.message : 'Failed to fetch statistics'
-        );
-      }
-    }
+  server.registerTool(
+    'nc_get_company_statistics',
+    {
+      annotations: READ_ONLY,
+      title: 'Company counts by dimension',
+      description:
+        'Number of active companies grouped by province, commune, legal form, NAF division (ape) or NAF section. Sorted by count, top 100.',
+      inputSchema: {
+        group_by: z
+          .enum(['province', 'commune', 'forme_juridique', 'ape', 'section'])
+          .describe('Grouping dimension'),
+      },
+    },
+    safe(async ({ group_by }) => {
+      const result = await client.groupCount(DATASET_COMPANIES, {
+        groupBy: GROUP_FIELDS[group_by],
+      });
+      return {
+        grouped_by: group_by,
+        truncated: result.truncated,
+        statistics: result.rows,
+      };
+    }),
   );
 }

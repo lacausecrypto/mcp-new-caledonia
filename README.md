@@ -10,26 +10,26 @@ Compact MCP server for [data.gouv.nc](https://data.gouv.nc/), exposing New Caled
 
 ## What It Covers
 
-- Public holidays
-- Digital fragility index
-- RIDET companies and establishments
-- Employment and job market datasets
-- Weather and rain station datasets
-- Mining and metallurgical production
-- Environment and coral reef monitoring
-- Public facilities and vehicle statistics
-- 2019 population census
-- Tourism trails and Tanéo transport metadata
+| Group | Tools |
+|---|---|
+| Administration | `nc_get_public_holidays`, `nc_is_public_holiday`, `nc_get_upcoming_holidays`, `nc_get_digital_fragility_index` |
+| Companies (RIDET) | `nc_search_companies`, `nc_get_company`, `nc_get_companies_by_sector`, `nc_get_company_statistics` |
+| Employment | `nc_search_job_offers`, `nc_get_job_seeker_stats`, `nc_get_partial_unemployment` |
+| Mining | `nc_get_metal_production` |
+| Geography | `nc_get_public_facilities`, `nc_search_facilities`, `nc_get_vehicle_stats` |
+| 2019 census | `nc_get_population_stats`, `nc_get_demographics_by_age`, `nc_get_transport_modes` |
+| Tourism & transport | `nc_get_gr_trail`, `nc_get_taneo_info` (GTFS download links) |
+| Whole catalog | `nc_search_datasets`, `nc_get_dataset_schema`, `nc_query_dataset` (raw ODSQL) |
 
-The server currently registers **29 tools** across **10 modules**.
+**23 tools**, all read-only (`readOnlyHint`). The catalog tools reach any queryable dataset of data.gouv.nc that has no dedicated tool.
 
 ## Why This Package
 
 - No API key required
-- Uses the official OpenDataSoft Explore v2.1 API
-- Handles real-world schema drift in live datasets
-- Returns explicit notes when a catalog entry exists but exposes no tabular records
-- Ships as a simple Node.js CLI for MCP-compatible hosts
+- Official OpenDataSoft Explore v2.1 API
+- Every tool is covered by a live end-to-end test against the real API
+- Failures are reported to the model as `isError` results with the upstream ODSQL error, never as empty data
+- User input is escaped for ODSQL (quotes, backslashes, LIKE wildcards)
 
 ## Install
 
@@ -56,36 +56,26 @@ npx mcp-new-caledonia
 }
 ```
 
-## Tool Groups
-
-- `administration`: holidays, holiday checks, upcoming holidays, digital fragility
-- `companies`: company search, company lookup, sector search, aggregates
-- `employment`: job offers, job seeker stats, civil servants, partial unemployment
-- `weather`: weather stations, rain stations
-- `mining`: mining titles, metal production, Nickel Fund sites
-- `environment`: water catchments, dry forest, piezometers, reef stations
-- `geography`: public facilities, facility search, vehicle statistics
-- `population`: census statistics, age demographics, transport modes
-- `tourism`: GR trail data
-- `transport`: Tanéo network information
-
 ## Local Development
 
 ```bash
 npm install
-npm run build
-npm test
+npm run check      # lint (Biome) + typecheck + unit tests + build
+npm run test:live  # end-to-end test of every tool against data.gouv.nc
 npm run dev
 ```
 
+## Release
+
+Push a `vX.Y.Z` tag whose version matches `package.json` and `server.json`. The `Publish` workflow runs the gate, publishes to npm with provenance (npm trusted publishing, no token) and to the MCP Registry.
+
 ## Production Notes
 
-- Runtime: Node.js 18+
+- Runtime: Node.js 22+
 - Transport: `stdio`
 - Upstream API: `https://data.gouv.nc/api/explore/v2.1`
 - Authentication: none
-- Language of source data: mostly French
-- Some datasets in the catalog are metadata-only or attachment-only; the server reports this cleanly instead of failing silently
+- Source data is mostly in French; census values are raw ISEE codes
 
 ## License
 

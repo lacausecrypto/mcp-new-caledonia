@@ -1,55 +1,41 @@
-// src/modules/tourism.ts
-
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { z } from 'zod';
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { client } from '../client.js';
-import { TrailStage } from '../types.js';
-import { errorResult, jsonResult, pickNumber, pickString } from '../utils/helpers.js';
+import { READ_ONLY, safe } from '../tool.js';
+import { geoPoint, num, str } from '../utils/records.js';
 
 const DATASET_GR_NORTH = 'gr-province-nord';
 
 export function registerTourismTools(server: McpServer): void {
-  /**
-   * Get GR hiking trail stages
-   */
-  server.tool(
+  server.registerTool(
     'nc_get_gr_trail',
-    'Get GR (Grande Randonnée) hiking trail information. NC has two famous long-distance trails.',
     {
-      province: z
-        .enum(['nord'])
-        .default('nord')
-        .describe('Province (currently only "nord" is available)'),
+      annotations: READ_ONLY,
+      title: 'GR Province Nord hiking trail',
+      description:
+        'Segments of the GR (Grande Randonnée) long-distance hiking trail of the Province Nord, with length and a reference point per segment.',
+      inputSchema: {},
     },
-    async ({ province }) => {
-      try {
-        const datasetId = province === 'nord' ? DATASET_GR_NORTH : DATASET_GR_NORTH;
-
-        const data = await client.getRecords<TrailStage>(datasetId, {
-          order_by: 'nom ASC',
-          limit: 50,
-        });
-
-        return jsonResult({
-          trail: `GR ${province.charAt(0).toUpperCase() + province.slice(1)}`,
-          total_stages: data.total_count,
-          stages: data.results.map((stage, index) => ({
-            stage_number: pickNumber(stage as Record<string, unknown>, ['etape']) ?? index + 1,
-            name: pickString(stage, ['nom']) ?? `Segment ${index + 1}`,
-            start: pickString(stage, ['depart']),
-            end: pickString(stage, ['arrivee']),
-            distance_km:
-              pickNumber(stage as Record<string, unknown>, ['distance_km']) ??
-              ((pickNumber(stage as Record<string, unknown>, ['longueur']) ?? 0) / 1000),
-            elevation_gain: pickNumber(stage as Record<string, unknown>, ['denivele_positif']),
-            estimated_duration: pickString(stage, ['duree_estimee']),
-          })),
-        });
-      } catch (error) {
-        return errorResult(
-          error instanceof Error ? error.message : 'Failed to fetch trail info'
-        );
-      }
-    }
+    safe(async () => {
+      const data = await client.getRecords(DATASET_GR_NORTH, {
+        order_by: 'objectid asc',
+        limit: 100,
+      });
+      const segments = data.results.map((row) => {
+        const meters = num(row, 'longueur');
+        return {
+          id: num(row, 'objectid'),
+          name: str(row, 'nom'),
+          length_km: meters === null ? null : Math.round(meters) / 1000,
+          reference_point: geoPoint(row),
+        };
+      });
+      const totalKm = segments.reduce((sum, s) => sum + (s.length_km ?? 0), 0);
+      return {
+        trail: 'GR Province Nord',
+        total_segments: data.total_count,
+        total_length_km: Math.round(totalKm * 1000) / 1000,
+        segments,
+      };
+    }),
   );
 }

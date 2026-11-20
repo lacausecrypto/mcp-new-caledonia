@@ -1,228 +1,179 @@
-// src/modules/administration.ts
-
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { client } from '../client.js';
-import { PublicHoliday, RecordObject } from '../types.js';
-import {
-  buildWhere,
-  daysBetween,
-  errorResult,
-  jsonResult,
-  pickBoolean,
-  pickNumber,
-  pickString,
-  quote,
-  today,
-} from '../utils/helpers.js';
+import { READ_ONLY, safe } from '../tool.js';
+import type { RecordObject } from '../types.js';
+import { daysBetween, isoDay, todayInNewCaledonia } from '../utils/dates.js';
+import { and, dateLiteral, isValidIsoDate, likePrefix } from '../utils/odsql.js';
+import { num, str } from '../utils/records.js';
 
 const DATASET_HOLIDAYS = 'jours-feries-en-nc';
 const DATASET_DIGITAL_INDEX = 'data_ifn_nc';
 
+const PROVINCES = ['Sud', 'Nord', 'Iles'] as const;
+
+function mapHoliday(row: RecordObject) {
+  const date = str(row, 'jour_ferie');
+  if (date === null) throw new Error('Holiday record without date');
+  return {
+    date,
+    name: str(row, 'nom_jour_ferie'),
+    type: str(row, 'type'),
+    zone: str(row, 'zone'),
+  };
+}
+
+async function holidayCoverage(): Promise<{ from: string; to: string }> {
+  const data = await client.getRecords(DATASET_HOLIDAYS, {
+    select: 'min(jour_ferie) as from_date, max(jour_ferie) as to_date',
+    limit: 1,
+  });
+  const row = data.results[0];
+  const from = row ? str(row, 'from_date') : null;
+  const to = row ? str(row, 'to_date') : null;
+  if (from === null || to === null) throw new Error('Holiday dataset is empty');
+  return { from: isoDay(from), to: isoDay(to) };
+}
+
 export function registerAdministrationTools(server: McpServer): void {
-  /**
-   * Get public holidays for a specific year
-   */
-  server.tool(
+  server.registerTool(
     'nc_get_public_holidays',
-    'Get all public holidays in New Caledonia for a specific year. New Caledonia has unique holidays different from mainland France.',
     {
-      year: z
-        .number()
-        .int()
-        .min(2020)
-        .max(2030)
-        .optional()
-        .describe('Year to query (default: current year)'),
+      annotations: READ_ONLY,
+      title: 'Public holidays by year',
+      description:
+        'List public holidays in New Caledonia for a year (they differ from mainland France, e.g. 24 September). The dataset only covers a limited range of years; an empty list means the year is not published.',
+      inputSchema: {
+        year: z
+          .number()
+          .int()
+          .min(2000)
+          .max(2100)
+          .optional()
+          .describe('Year (default: current year in New Caledonia)'),
+      },
     },
-    async ({ year }) => {
-      try {
-        const targetYear = year ?? new Date().getFullYear();
-        const [dateField, typeField, sectorField, dayOffField] = await Promise.all([
-          client.resolveField(DATASET_HOLIDAYS, ['jour_ferie', 'date_ferie']),
-          client.resolveField(DATASET_HOLIDAYS, ['type', 'type_jour']),
-          client.resolveField(DATASET_HOLIDAYS, ['zone', 'secteur']),
-          client.resolveField(DATASET_HOLIDAYS, ['is_chome', 'jour_chome']),
-        ]);
-
-        const safeDateField = dateField ?? 'jour_ferie';
-
-        const data = await client.getRecords<PublicHoliday>(DATASET_HOLIDAYS, {
-          where: `${safeDateField} >= '${targetYear}-01-01' AND ${safeDateField} <= '${targetYear}-12-31'`,
-          order_by: `${safeDateField} ASC`,
-          limit: 100,
-        });
-
-        return jsonResult({
-          year: targetYear,
-          total_holidays: data.total_count,
-          holidays: data.results.map((holiday) => {
-            const date = pickString(holiday, [safeDateField]);
-            return {
-              date,
-              name: pickString(holiday, ['nom_jour_ferie']) ?? 'Unknown',
-              type: pickString(holiday, [typeField ?? 'type', 'type', 'type_jour']),
-              sectors: pickString(holiday, [sectorField ?? 'zone', 'zone', 'secteur']),
-              day_off:
-                pickBoolean(holiday, [dayOffField ?? 'is_chome', 'is_chome', 'jour_chome']) ??
-                false,
-            };
-          }),
-        });
-      } catch (error) {
-        return errorResult(
-          error instanceof Error ? error.message : 'Failed to fetch holidays'
-        );
-      }
-    }
+    safe(async ({ year }) => {
+      const targetYear = year ?? Number(todayInNewCaledonia().slice(0, 4));
+      const data = await client.getRecords(DATASET_HOLIDAYS, {
+        where: `jour_ferie >= ${dateLiteral(`${targetYear}-01-01`)} AND jour_ferie <= ${dateLiteral(`${targetYear}-12-31`)}`,
+        order_by: 'jour_ferie asc',
+        limit: 100,
+      });
+      return {
+        year: targetYear,
+        total_holidays: data.total_count,
+        holidays: data.results.map(mapHoliday),
+      };
+    }),
   );
 
-  /**
-   * Check if a specific date is a public holiday
-   */
-  server.tool(
+  server.registerTool(
     'nc_is_public_holiday',
-    'Check if a specific date is a public holiday in New Caledonia',
     {
-      date: z
-        .string()
-        .regex(/^\d{4}-\d{2}-\d{2}$/)
-        .describe('Date to check in YYYY-MM-DD format'),
+      annotations: READ_ONLY,
+      title: 'Is this date a public holiday?',
+      description:
+        'Check whether a date is a public holiday in New Caledonia. Fails if the date is outside the years covered by the dataset.',
+      inputSchema: {
+        date: z
+          .string()
+          .refine(isValidIsoDate, 'Expected a valid date in YYYY-MM-DD format')
+          .describe('Date to check (YYYY-MM-DD)'),
+      },
     },
-    async ({ date }) => {
-      try {
-        const dateField =
-          (await client.resolveField(DATASET_HOLIDAYS, ['jour_ferie', 'date_ferie'])) ??
-          'jour_ferie';
-
-        const data = await client.getRecords<PublicHoliday>(DATASET_HOLIDAYS, {
-          where: `${dateField} = '${date}'`,
-          limit: 1,
-        });
-
-        const isHoliday = data.total_count > 0;
-        const holiday = data.results[0];
-
-        return jsonResult({
-          date,
-          is_public_holiday: isHoliday,
-          ...(isHoliday &&
-            holiday && {
-              holiday_name: pickString(holiday, ['nom_jour_ferie']),
-              type: pickString(holiday, ['type', 'type_jour']),
-              sectors: pickString(holiday, ['zone', 'secteur']),
-            }),
-        });
-      } catch (error) {
-        return errorResult(
-          error instanceof Error ? error.message : 'Failed to check date'
+    safe(async ({ date }) => {
+      const coverage = await holidayCoverage();
+      if (
+        date.slice(0, 4) < coverage.from.slice(0, 4) ||
+        date.slice(0, 4) > coverage.to.slice(0, 4)
+      ) {
+        throw new Error(
+          `Date ${date} is outside the dataset coverage (${coverage.from} → ${coverage.to}); cannot tell.`,
         );
       }
-    }
+      const data = await client.getRecords(DATASET_HOLIDAYS, {
+        where: `jour_ferie = ${dateLiteral(date)}`,
+        limit: 1,
+      });
+      const row = data.results[0];
+      return {
+        date,
+        is_public_holiday: row !== undefined,
+        holiday: row === undefined ? null : mapHoliday(row),
+      };
+    }),
   );
 
-  /**
-   * Get upcoming public holidays
-   */
-  server.tool(
+  server.registerTool(
     'nc_get_upcoming_holidays',
-    'Get the next upcoming public holidays in New Caledonia from today',
     {
-      limit: z
-        .number()
-        .int()
-        .min(1)
-        .max(20)
-        .default(5)
-        .describe('Number of upcoming holidays to return (default: 5)'),
+      annotations: READ_ONLY,
+      title: 'Upcoming public holidays',
+      description: 'Next public holidays in New Caledonia from today (New Caledonia time, UTC+11).',
+      inputSchema: {
+        limit: z.number().int().min(1).max(20).default(5).describe('Number of holidays to return'),
+      },
     },
-    async ({ limit }) => {
-      try {
-        const todayDate = today();
-        const dateField =
-          (await client.resolveField(DATASET_HOLIDAYS, ['jour_ferie', 'date_ferie'])) ??
-          'jour_ferie';
-
-        const data = await client.getRecords<PublicHoliday>(DATASET_HOLIDAYS, {
-          where: `${dateField} >= '${todayDate}'`,
-          order_by: `${dateField} ASC`,
-          limit,
-        });
-
-        return jsonResult({
-          from_date: todayDate,
-          upcoming_holidays: data.results.map((holiday) => {
-            const holidayDate = pickString(holiday, [dateField]) ?? todayDate;
-            return {
-              date: holidayDate,
-              name: pickString(holiday, ['nom_jour_ferie']) ?? 'Unknown',
-              days_until: daysBetween(todayDate, holidayDate),
-              type: pickString(holiday, ['type', 'type_jour']),
-            };
-          }),
-        });
-      } catch (error) {
-        return errorResult(
-          error instanceof Error ? error.message : 'Failed to fetch upcoming holidays'
-        );
-      }
-    }
+    safe(async ({ limit }) => {
+      const today = todayInNewCaledonia();
+      const data = await client.getRecords(DATASET_HOLIDAYS, {
+        where: `jour_ferie >= ${dateLiteral(today)}`,
+        order_by: 'jour_ferie asc',
+        limit,
+      });
+      return {
+        from_date: today,
+        upcoming_holidays: data.results.map((row) => {
+          const holiday = mapHoliday(row);
+          return { ...holiday, days_until: daysBetween(today, holiday.date) };
+        }),
+      };
+    }),
   );
 
-  /**
-   * Get digital fragility index by commune
-   */
-  server.tool(
+  server.registerTool(
     'nc_get_digital_fragility_index',
-    'Get the digital fragility index for communes in New Caledonia. Higher score means higher risk of digital exclusion.',
     {
-      commune: z.string().optional().describe('Filter by commune name'),
-      province: z
-        .enum(['Sud', 'Nord', 'Iles'])
-        .optional()
-        .describe('Filter by province'),
+      annotations: READ_ONLY,
+      title: 'Digital fragility index by commune',
+      description:
+        'Digital fragility index (IFN) of the 33 communes of New Caledonia, sorted by contextualized score (higher = higher risk of digital exclusion), with coverage and socio-economic indicators.',
+      inputSchema: {
+        commune: z
+          .string()
+          .trim()
+          .min(1)
+          .max(80)
+          .optional()
+          .describe('Commune name prefix (case/accent-insensitive)'),
+        province: z.enum(PROVINCES).optional().describe('Province'),
+      },
     },
-    async ({ commune, province }) => {
-      try {
-        const [communeField, provinceField, scoreField, contextualizedScoreField] =
-          await Promise.all([
-            client.resolveField(DATASET_DIGITAL_INDEX, ['nom_com', 'commune']),
-            client.resolveField(DATASET_DIGITAL_INDEX, ['province']),
-            client.resolveField(DATASET_DIGITAL_INDEX, ['ifn_contextualise', 'score_global']),
-            client.resolveField(DATASET_DIGITAL_INDEX, ['ifn', 'score_global']),
-          ]);
-
-        const conditions = buildWhere([
-          commune && communeField
-            ? `${communeField} LIKE ${quote(`${commune}%`)}`
-            : undefined,
-          province && provinceField
-            ? `${provinceField} LIKE ${quote(`%${province}%`)}`
-            : undefined,
-        ]);
-
-        const data = await client.getRecords<RecordObject>(DATASET_DIGITAL_INDEX, {
-          where: conditions,
-          order_by: `${scoreField ?? 'ifn_contextualise'} DESC`,
-          limit: 50,
-        });
-
-        return jsonResult({
-          total_communes: data.total_count,
-          results: data.results.map((row) => ({
-            commune: pickString(row, [communeField ?? 'nom_com', 'nom_com', 'commune']),
-            province: pickString(row, [provinceField ?? 'province', 'province']),
-            score: pickNumber(row, [scoreField ?? 'ifn_contextualise', 'ifn_contextualise']),
-            raw_ifn: pickNumber(row, [contextualizedScoreField ?? 'ifn', 'ifn']),
-            population: pickNumber(row, ['population_legale']),
-            density: pickNumber(row, ['densite']),
-          })),
-        });
-      } catch (error) {
-        return errorResult(
-          error instanceof Error ? error.message : 'Failed to fetch digital index'
-        );
-      }
-    }
+    safe(async ({ commune, province }) => {
+      const data = await client.getRecords(DATASET_DIGITAL_INDEX, {
+        where: and([
+          commune === undefined ? undefined : likePrefix('nom_com', commune),
+          province === undefined ? undefined : likePrefix('province', province),
+        ]),
+        order_by: 'ifn_contextualise desc',
+        limit: 100,
+      });
+      return {
+        total_communes: data.total_count,
+        results: data.results.map((row) => ({
+          commune: str(row, 'nom_com'),
+          province: str(row, 'province'),
+          area: str(row, 'eth'),
+          score_contextualized: num(row, 'ifn_contextualise'),
+          score_raw: num(row, 'ifn'),
+          population: num(row, 'population_legale'),
+          density_per_km2: num(row, 'densite'),
+          no_very_high_speed_coverage_rate: num(row, 'taux_de_non_couverture_thd'),
+          no_4g_coverage_rate: num(row, 'taux_de_non_couverture_mobile_4g'),
+          poverty_rate: num(row, 'taux_de_pauvrete'),
+        })),
+      };
+    }),
   );
 }

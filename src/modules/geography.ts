@@ -1,213 +1,153 @@
-// src/modules/geography.ts
-
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import { client } from '../client.js';
-import { PublicFacility, RecordObject } from '../types.js';
-import {
-  buildWhere,
-  errorResult,
-  jsonResult,
-  pickNumber,
-  pickString,
-  quote,
-} from '../utils/helpers.js';
+import { READ_ONLY, safe } from '../tool.js';
+import type { RecordObject } from '../types.js';
+import { and, eq, likePrefix, search } from '../utils/odsql.js';
+import { geoPoint, str } from '../utils/records.js';
 
 const DATASET_FACILITIES = 'atlas-equipements-publics-serail';
 const DATASET_VEHICLES = 'vehicules-immatricules-nc';
 
-const facilityTypeMap: Record<string, string> = {
-  Enseignement: 'ENSEIGNEMENT',
-  Sport: 'SPORT',
-  Administration: 'ADMINISTRATION',
-  'Justice et Sécurité': 'JUSTICE',
-  'Culture et Socio-éducatif': 'CULTURE',
-  'Sanitaire et Social': 'SANITAIRE',
-  'Transport et Déchet': 'TRANSPORT',
+/** Tool enum → exact `theme1` value in the SERAIL atlas. */
+const FACILITY_THEMES = {
+  Enseignement: 'ENSEIGNEMENT ET FORMATION',
+  Sport: 'EQUIPEMENT SPORTIF',
+  Administration: 'ADMINISTRATION ET ORGANISME',
+  'Justice et Sécurité': 'JUSTICE SECURITE SECOURS FORCE ARMEE',
+  'Culture et Socio-éducatif': 'CULTUREL ET SOCIO EDUCATIF',
+  'Sanitaire et Social': 'SANITAIRE ET SOCIAL',
+  'Transport et Déchet': 'TRANSPORT ET DECHET',
   Culte: 'CULTE',
-  'Parcs et loisirs': 'PARCS',
-};
+  'Parcs et loisirs': 'PARC ESPACE PUBLIC ET LOISIR',
+} as const;
 
-function extractCoordinates(record: PublicFacility): { latitude?: number; longitude?: number } {
+type FacilityType = keyof typeof FACILITY_THEMES;
+const FACILITY_TYPES = Object.keys(FACILITY_THEMES) as [FacilityType, ...FacilityType[]];
+
+const VEHICLE_DATE = 'date_1ere_mise_en_circulation';
+const VEHICLE_GROUPS = {
+  type: 'genre',
+  marque: 'marque',
+  energie: 'energie',
+  annee: `year(${VEHICLE_DATE}) as annee`,
+  commune: 'commune_proprietaire',
+} as const;
+
+/** The atlas stores communes upper-case without accents or separators ("MONTDORE"). */
+function atlasCommune(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '')
+    .toUpperCase()
+    .replace(/[^A-Z]/g, '');
+}
+
+function mapFacility(row: RecordObject) {
   return {
-    latitude: record.geo_point_2d?.lat ?? record.latitude,
-    longitude: record.geo_point_2d?.lon ?? record.longitude,
+    name: str(row, 'lib_norme'),
+    type: str(row, 'lib_court'),
+    category: str(row, 'theme1'),
+    subcategory: str(row, 'theme2'),
+    commune: str(row, 'apparten'),
+    district: str(row, 'quartier'),
+    address: str(row, 'libadrs'),
+    manager: str(row, 'gest_eq'),
+    coordinates: geoPoint(row),
   };
 }
 
 export function registerGeographyTools(server: McpServer): void {
-  /**
-   * Get public facilities
-   */
-  server.tool(
+  server.registerTool(
     'nc_get_public_facilities',
-    'Get public facilities (schools, sports, health, transport) in Greater Nouméa',
     {
-      type: z
-        .enum([
-          'Enseignement',
-          'Sport',
-          'Administration',
-          'Justice et Sécurité',
-          'Culture et Socio-éducatif',
-          'Sanitaire et Social',
-          'Transport et Déchet',
-          'Culte',
-          'Parcs et loisirs',
-        ])
-        .optional()
-        .describe('Type of facility'),
-      commune: z.string().optional().describe('Filter by commune'),
-      limit: z.number().int().min(1).max(100).default(50).describe('Max results'),
+      annotations: READ_ONLY,
+      title: 'Public facilities (SERAIL atlas)',
+      description:
+        'Public facilities from the SERAIL atlas (schools, sports, health, administration…). Covers Nouméa, Dumbéa, Mont-Dore, Païta, Boulouparis, Bourail, Koné, Koumac, Voh, Kaala-Gomen and Pouembout.',
+      inputSchema: {
+        type: z.enum(FACILITY_TYPES).optional().describe('Facility category'),
+        commune: z.string().trim().min(1).max(80).optional().describe('Commune name'),
+        limit: z.number().int().min(1).max(100).default(50).describe('Max results'),
+      },
     },
-    async ({ type, commune, limit }) => {
-      try {
-        const [communeField, categoryField] = await Promise.all([
-          client.resolveField(DATASET_FACILITIES, ['apparten', 'commune']),
-          client.resolveField(DATASET_FACILITIES, ['theme1', 'famille']),
-        ]);
-
-        const data = await client.getRecords<PublicFacility>(DATASET_FACILITIES, {
-          where: buildWhere([
-            type && categoryField
-              ? `${categoryField} LIKE ${quote(`${facilityTypeMap[type]}%`)}`
-              : undefined,
-            commune && communeField
-              ? `${communeField} LIKE ${quote(`${commune.toUpperCase()}%`)}`
-              : undefined,
-          ]),
-          limit,
-        });
-
-        return jsonResult({
-          total_facilities: data.total_count,
-          facilities: data.results.map((facility) => ({
-            name: pickString(facility, ['lib_norme', 'nom']),
-            type: pickString(facility, ['lib_court', 'type']),
-            category: pickString(facility, [categoryField ?? 'theme1', 'theme1', 'famille']),
-            commune: pickString(facility, [communeField ?? 'apparten', 'apparten', 'commune']),
-            address: pickString(facility, ['libadrs', 'adresse']),
-            coordinates: extractCoordinates(facility),
-          })),
-        });
-      } catch (error) {
-        return errorResult(
-          error instanceof Error ? error.message : 'Failed to fetch facilities'
-        );
-      }
-    }
+    safe(async ({ type, commune, limit }) => {
+      const data = await client.getRecords(DATASET_FACILITIES, {
+        where: and([
+          type === undefined ? undefined : eq('theme1', FACILITY_THEMES[type]),
+          commune === undefined ? undefined : likePrefix('apparten', atlasCommune(commune)),
+        ]),
+        order_by: 'lib_norme asc',
+        limit,
+      });
+      return {
+        total_facilities: data.total_count,
+        facilities: data.results.map(mapFacility),
+      };
+    }),
   );
 
-  /**
-   * Search facilities by name
-   */
-  server.tool(
+  server.registerTool(
     'nc_search_facilities',
-    'Search public facilities by name in Greater Nouméa',
     {
-      query: z.string().min(2).describe('Search term'),
-      limit: z.number().int().min(1).max(50).default(20).describe('Max results'),
+      annotations: READ_ONLY,
+      title: 'Search public facilities',
+      description:
+        'Full-text search of public facilities in the SERAIL atlas (e.g. "piscine", "collège").',
+      inputSchema: {
+        query: z.string().trim().min(2).max(200).describe('Search terms'),
+        limit: z.number().int().min(1).max(100).default(20).describe('Max results'),
+      },
     },
-    async ({ query, limit }) => {
-      try {
-        const data = await client.getRecords<PublicFacility>(DATASET_FACILITIES, {
-          where: `search(${quote(query)})`,
-          limit,
-        });
-
-        return jsonResult({
-          query,
-          total_found: data.total_count,
-          facilities: data.results.map((facility) => ({
-            name: pickString(facility, ['lib_norme', 'nom']),
-            type: pickString(facility, ['lib_court', 'type']),
-            category: pickString(facility, ['theme1', 'famille']),
-            commune: pickString(facility, ['apparten', 'commune']),
-            coordinates: extractCoordinates(facility),
-          })),
-        });
-      } catch (error) {
-        return errorResult(
-          error instanceof Error ? error.message : 'Failed to search facilities'
-        );
-      }
-    }
+    safe(async ({ query, limit }) => {
+      const data = await client.getRecords(DATASET_FACILITIES, {
+        where: search(query),
+        limit,
+      });
+      return {
+        query,
+        total_found: data.total_count,
+        facilities: data.results.map(mapFacility),
+      };
+    }),
   );
 
-  /**
-   * Get vehicle registration statistics
-   */
-  server.tool(
+  server.registerTool(
     'nc_get_vehicle_stats',
-    'Get statistics about registered vehicles in New Caledonia',
     {
-      vehicle_type: z.string().optional().describe('Filter by vehicle type'),
-      year: z.number().int().min(1990).max(2030).optional().describe('Registration year'),
-      group_by: z
-        .enum(['type', 'marque', 'annee', 'commune'])
-        .default('type')
-        .describe('How to group results'),
+      annotations: READ_ONLY,
+      title: 'Registered vehicle statistics',
+      description:
+        'Number of registered vehicles grouped by type (genre), make, energy, first-registration year or owner commune. Includes every registration in the dataset. Top 100 groups by count.',
+      inputSchema: {
+        group_by: z
+          .enum(['type', 'marque', 'energie', 'annee', 'commune'])
+          .default('type')
+          .describe('Grouping dimension'),
+        vehicle_type: z
+          .string()
+          .trim()
+          .min(1)
+          .max(80)
+          .optional()
+          .describe('Vehicle type (genre) prefix, e.g. "VOITURE PARTICULIERE", "CAMIONNETTE"'),
+        year: z.number().int().min(1900).max(2100).optional().describe('First registration year'),
+      },
     },
-    async ({ vehicle_type, year, group_by }) => {
-      try {
-        const dateField =
-          (await client.resolveField(DATASET_VEHICLES, [
-            'date_1ere_mise_en_circulation',
-            'date_emission',
-          ])) ?? 'date_1ere_mise_en_circulation';
-
-        const groupFieldMap: Record<string, string | undefined> = {
-          type: await client.resolveField(DATASET_VEHICLES, ['genre', 'type_nc']),
-          marque: await client.resolveField(DATASET_VEHICLES, ['marque']),
-          annee: dateField,
-          commune: await client.resolveField(DATASET_VEHICLES, [
-            'commune_proprietaire',
-            'commune',
-          ]),
-        };
-
-        const typeField =
-          (await client.resolveField(DATASET_VEHICLES, ['genre', 'type_nc'])) ?? 'genre';
-        const groupField = groupFieldMap[group_by];
-
-        if (!groupField) {
-          return jsonResult({
-            grouped_by: group_by,
-            message: 'Requested grouping is not available on the current dataset schema.',
-            statistics: [],
-          });
-        }
-
-        const where = buildWhere([
-          vehicle_type ? `${typeField} LIKE ${quote(`${vehicle_type}%`)}` : undefined,
-          year !== undefined
-            ? `${dateField} >= '${year}-01-01' AND ${dateField} < '${year + 1}-01-01'`
-            : undefined,
-        ]);
-
-        const data = await client.getAggregates<RecordObject>(
-          DATASET_VEHICLES,
-          `count(*) as count, ${groupField}`,
-          {
-            where,
-            groupBy: groupField,
-          }
-        );
-
-        return jsonResult({
-          grouped_by: group_by,
-          source_field: groupField,
-          note:
-            group_by === 'annee'
-              ? 'The public dataset exposes full dates. Grouping by "annee" therefore uses the source date field as published.'
-              : undefined,
-          statistics: data.results,
-        });
-      } catch (error) {
-        return errorResult(
-          error instanceof Error ? error.message : 'Failed to fetch vehicle stats'
-        );
-      }
-    }
+    safe(async ({ group_by, vehicle_type, year }) => {
+      const result = await client.groupCount(DATASET_VEHICLES, {
+        groupBy: VEHICLE_GROUPS[group_by],
+        where: and([
+          vehicle_type === undefined ? undefined : likePrefix('genre', vehicle_type),
+          year === undefined ? undefined : `year(${VEHICLE_DATE}) = ${year}`,
+        ]),
+        orderBy: group_by === 'annee' ? 'annee desc' : 'count desc',
+      });
+      return {
+        grouped_by: group_by,
+        truncated: result.truncated,
+        statistics: result.rows,
+      };
+    }),
   );
 }

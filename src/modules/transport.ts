@@ -1,39 +1,47 @@
-// src/modules/transport.ts
-
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { client } from '../client.js';
-import { errorResult, jsonResult } from '../utils/helpers.js';
+import { READ_ONLY, safe } from '../tool.js';
 
 const DATASET_TANEO = 'offre-de-transport-du-reseau-taneo';
 
-export function registerTransportTools(server: McpServer): void {
-  /**
-   * Get Tanéo network info
-   */
-  server.tool(
-    'nc_get_taneo_info',
-    'Get information about the Tanéo public transport network serving Greater Nouméa (Nouméa, Dumbéa, Mont-Dore, Païta)',
-    {},
-    async () => {
-      try {
-        const metadata = await client.getDatasetMetadata(DATASET_TANEO);
+function fileEntry(value: unknown): { filename: string; url: string } {
+  if (
+    typeof value === 'object' &&
+    value !== null &&
+    'filename' in value &&
+    'url' in value &&
+    typeof value.filename === 'string' &&
+    typeof value.url === 'string'
+  ) {
+    return { filename: value.filename, url: value.url };
+  }
+  throw new Error('Unexpected file record in the Tanéo dataset');
+}
 
-        return jsonResult({
-          network_name: 'Tanéo',
-          operator: 'SMTU (Syndicat Mixte des Transports Urbains)',
-          coverage: ['Nouméa', 'Dumbéa', 'Mont-Dore', 'Païta'],
-          data_format: 'GTFS',
-          note: 'GTFS files are available as attachments on the dataset page',
-          dataset_url:
-            'https://data.gouv.nc/explore/dataset/offre-de-transport-du-reseau-taneo/',
-          total_records: metadata?.metas?.default?.records_count ?? 0,
-          has_records: metadata?.has_records ?? false,
-        });
-      } catch (error) {
-        return errorResult(
-          error instanceof Error ? error.message : 'Failed to fetch Tanéo info'
-        );
-      }
-    }
+export function registerTransportTools(server: McpServer): void {
+  server.registerTool(
+    'nc_get_taneo_info',
+    {
+      annotations: READ_ONLY,
+      title: 'Tanéo network GTFS feed',
+      description:
+        'Tanéo public transport network of Greater Nouméa: publisher, last update and direct download links of the GTFS files (stops, routes, trips, stop_times…).',
+      inputSchema: {},
+    },
+    safe(async () => {
+      const [metadata, records] = await Promise.all([
+        client.getDatasetMetadata(DATASET_TANEO),
+        client.getRecords(DATASET_TANEO, { limit: 100 }),
+      ]);
+      return {
+        network_name: 'Tanéo',
+        dataset_title: metadata.metas?.default?.title ?? null,
+        publisher: metadata.metas?.default?.publisher ?? null,
+        last_modified: metadata.metas?.default?.modified ?? null,
+        format: 'GTFS',
+        dataset_url: `https://data.gouv.nc/explore/dataset/${DATASET_TANEO}/`,
+        gtfs_files: records.results.map((row) => fileEntry(row.file)),
+      };
+    }),
   );
 }
